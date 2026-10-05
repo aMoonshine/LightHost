@@ -1,3 +1,6 @@
 Builds/
 JuceLibraryCode/
 lib/
+build/
+build-dbg/
+dist/

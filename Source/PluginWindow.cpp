@@ -1,8 +1,10 @@
-#include "../JuceLibraryCode/JuceHeader.h"
+/*
+    PluginWindow.cpp - Light Host
+*/
+
 #include "PluginWindow.h"
 
-class PluginWindow;
-static Array <PluginWindow*> activePluginWindows;
+static Array<PluginWindow*> activePluginWindows;
 
 PluginWindow::PluginWindow (Component* const pluginEditor,
                             AudioProcessorGraph::Node* const o,
@@ -13,7 +15,7 @@ PluginWindow::PluginWindow (Component* const pluginEditor,
       type (t)
 {
     setSize (400, 300);
-    setUsingNativeTitleBar(true);
+    setUsingNativeTitleBar (true);
     setContentOwned (pluginEditor, true);
 
     setTopLeftPosition (owner->properties.getWithDefault (getLastXProp (type), Random::getSystemRandom().nextInt (500)),
@@ -22,15 +24,13 @@ PluginWindow::PluginWindow (Component* const pluginEditor,
     owner->properties.set (getOpenProp (type), true);
 
     setVisible (true);
-
     activePluginWindows.add (this);
-    
 }
 
 void PluginWindow::closeCurrentlyOpenWindowsFor (const uint32 nodeId)
 {
     for (int i = activePluginWindows.size(); --i >= 0;)
-        if (activePluginWindows.getUnchecked(i)->owner->nodeId == nodeId)
+        if (activePluginWindows.getUnchecked (i)->owner->nodeID.uid == nodeId)
             delete activePluginWindows.getUnchecked (i);
 }
 
@@ -41,6 +41,8 @@ void PluginWindow::closeAllCurrentlyOpenWindows()
         for (int i = activePluginWindows.size(); --i >= 0;)
             delete activePluginWindows.getUnchecked (i);
 
+        // Let the window server catch up: these are real top-level HWNDs and deleting
+        // them posts work that would otherwise run later, against a destroyed graph.
         Component dummyModalComp;
         dummyModalComp.enterModalState();
         MessageManager::getInstance()->runDispatchLoopUntil (50);
@@ -53,8 +55,8 @@ bool PluginWindow::containsActiveWindows()
 }
 
 //==============================================================================
-class ProcessorProgramPropertyComp : public PropertyComponent,
-                                     private AudioProcessorListener
+class ProcessorProgramPropertyComp  : public PropertyComponent,
+                                       private AudioProcessorListener
 {
 public:
     ProcessorProgramPropertyComp (const String& name, AudioProcessor& p, int index_)
@@ -65,14 +67,14 @@ public:
         owner.addListener (this);
     }
 
-    ~ProcessorProgramPropertyComp()
+    ~ProcessorProgramPropertyComp() override
     {
         owner.removeListener (this);
     }
 
-    void refresh() { }
-    virtual void audioProcessorChanged (AudioProcessor*) { }
-    virtual void audioProcessorParameterChanged(AudioProcessor* processor, int, float) { }
+    void refresh() override {}
+    void audioProcessorChanged (AudioProcessor*, const ChangeDetails&) override {}
+    void audioProcessorParameterChanged (AudioProcessor*, int, float) override {}
 
 private:
     AudioProcessor& owner;
@@ -81,10 +83,10 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ProcessorProgramPropertyComp)
 };
 
-class ProgramAudioProcessorEditor : public AudioProcessorEditor
+class ProgramAudioProcessorEditor  : public AudioProcessorEditor
 {
 public:
-    ProgramAudioProcessorEditor (AudioProcessor* const p)
+    explicit ProgramAudioProcessorEditor (AudioProcessor* const p)
         : AudioProcessorEditor (p)
     {
         jassert (p != nullptr);
@@ -93,7 +95,6 @@ public:
         addAndMakeVisible (panel);
 
         Array<PropertyComponent*> programs;
-
         const int numPrograms = p->getNumPrograms();
         int totalHeight = 0;
 
@@ -104,25 +105,17 @@ public:
             if (name.isEmpty())
                 name = "Unnamed";
 
-            ProcessorProgramPropertyComp* const pc = new ProcessorProgramPropertyComp (name, *p, i);
+            auto* const pc = new ProcessorProgramPropertyComp (name, *p, i);
             programs.add (pc);
             totalHeight += pc->getPreferredHeight();
         }
 
         panel.addProperties (programs);
-
         setSize (400, jlimit (25, 400, totalHeight));
     }
 
-    void paint (Graphics& g)
-    {
-        g.fillAll (Colours::grey);
-    }
-
-    void resized()
-    {
-        panel.setBounds (getLocalBounds());
-    }
+    void paint (Graphics& g) override        { g.fillAll (Colours::grey); }
+    void resized() override                 { panel.setBounds (getLocalBounds()); }
 
 private:
     PropertyPanel panel;
@@ -137,11 +130,15 @@ PluginWindow* PluginWindow::getWindowFor (AudioProcessorGraph::Node* const node,
     jassert (node != nullptr);
 
     for (int i = activePluginWindows.size(); --i >= 0;)
-        if (activePluginWindows.getUnchecked(i)->owner == node
-             && activePluginWindows.getUnchecked(i)->type == type)
-            return activePluginWindows.getUnchecked(i);
+        if (activePluginWindows.getUnchecked (i)->owner == node
+             && activePluginWindows.getUnchecked (i)->type == type)
+            return activePluginWindows.getUnchecked (i);
 
     AudioProcessor* processor = node->getProcessor();
+
+    if (processor == nullptr)
+        return nullptr;
+
     AudioProcessorEditor* ui = nullptr;
 
     if (type == Normal)
@@ -155,14 +152,14 @@ PluginWindow* PluginWindow::getWindowFor (AudioProcessorGraph::Node* const node,
     if (ui == nullptr)
     {
         if (type == Generic || type == Parameters)
-            ui = new GenericAudioProcessorEditor (processor);
+            ui = new GenericAudioProcessorEditor (*processor);
         else if (type == Programs)
             ui = new ProgramAudioProcessorEditor (processor);
     }
 
     if (ui != nullptr)
     {
-        if (AudioPluginInstance* const plugin = dynamic_cast<AudioPluginInstance*> (processor))
+        if (auto* const plugin = dynamic_cast<AudioPluginInstance*> (processor))
             ui->setName (plugin->getName());
 
         return new PluginWindow (ui, node, type);
