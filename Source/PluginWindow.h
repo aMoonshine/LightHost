@@ -23,9 +23,7 @@ public:
 
     static PluginWindow* getWindowFor (AudioProcessorGraph::Node*, WindowFormatType);
 
-    static void closeCurrentlyOpenWindowsFor (uint32 nodeId);
     static void closeAllCurrentlyOpenWindows();
-    static bool containsActiveWindows();
 
     void moved() override;
     void closeButtonPressed() override;

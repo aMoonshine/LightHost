@@ -47,6 +47,7 @@ private:
     void deletePluginStates();
     void movePlugin (int index, int direction);
     PluginDescription getNextPluginOlderThanTime (int& time) const;
+    AudioProcessorGraph::NodeID getNodeIdFor (const PluginDescription& plugin) const;
     void removePluginsLackingInputOutput();
     std::vector<PluginDescription> getTimeSortedList() const;
     void setIcon();
@@ -75,6 +76,9 @@ private:
 
     AudioProcessorGraph::Node* inputNode  = nullptr;
     AudioProcessorGraph::Node* outputNode = nullptr;
+
+    // Successfully instantiated plugins in graph order; index + 1 is the node id.
+    std::vector<PluginDescription> nodeDescriptions;
     bool menuIconLeftClicked = false;
     int x = 0, y = 0;   // cached cursor position for the tray popup on Windows
 

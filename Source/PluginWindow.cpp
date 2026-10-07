@@ -27,31 +27,15 @@ PluginWindow::PluginWindow (Component* const pluginEditor,
     activePluginWindows.add (this);
 }
 
-void PluginWindow::closeCurrentlyOpenWindowsFor (const uint32 nodeId)
-{
-    for (int i = activePluginWindows.size(); --i >= 0;)
-        if (activePluginWindows.getUnchecked (i)->owner->nodeID.uid == nodeId)
-            delete activePluginWindows.getUnchecked (i);
-}
-
 void PluginWindow::closeAllCurrentlyOpenWindows()
 {
+    // The editor windows are heavyweight top-level HWNDs; deleting them
+    // synchronously destroys their peers, so no nested event loop is needed.
     if (activePluginWindows.size() > 0)
     {
         for (int i = activePluginWindows.size(); --i >= 0;)
             delete activePluginWindows.getUnchecked (i);
-
-        // Let the window server catch up: these are real top-level HWNDs and deleting
-        // them posts work that would otherwise run later, against a destroyed graph.
-        Component dummyModalComp;
-        dummyModalComp.enterModalState();
-        MessageManager::getInstance()->runDispatchLoopUntil (50);
     }
-}
-
-bool PluginWindow::containsActiveWindows()
-{
-    return activePluginWindows.size() > 0;
 }
 
 //==============================================================================
@@ -143,7 +127,7 @@ PluginWindow* PluginWindow::getWindowFor (AudioProcessorGraph::Node* const node,
 
     if (type == Normal)
     {
-        ui = processor->createEditorIfNeeded();
+        ui = processor->createEditorAndMakeActive();
 
         if (ui == nullptr)
             type = Generic;

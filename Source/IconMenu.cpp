@@ -166,7 +166,7 @@ void IconMenu::setIcon()
     if (! getUserSettings().containsKey ("icon"))
         getUserSettings().setValue ("icon", defaultColor);
 
-    const String color = getUserSettings().getValue ("icon");
+        const String color = getUserSettings().getValue ("icon");
 
     Image icon;
 
@@ -174,6 +174,9 @@ void IconMenu::setIcon()
         icon = ImageFileFormat::loadFrom (BinaryData::menu_icon_white_png, BinaryData::menu_icon_white_pngSize);
     else if (color.equalsIgnoreCase ("black"))
         icon = ImageFileFormat::loadFrom (BinaryData::menu_icon_png, BinaryData::menu_icon_pngSize);
+    else
+        // An unrecognised setting must not hide the tray icon entirely.
+        icon = ImageFileFormat::loadFrom (BinaryData::menu_icon_white_png, BinaryData::menu_icon_white_pngSize);
 
     // JUCE 8 wants a colour image plus a separate macOS template image.
     setIconImage (icon, Image());
@@ -200,9 +203,16 @@ void IconMenu::loadActivePlugins()
         connectChannels (graph, inputNodeId,  channelTwo, outputNodeId, channelTwo);
     }
 
-    int pluginTime = 0;
+    // Start below every possible order value: legacy settings can legitimately
+    // contain order 0 (written by the old movePlugin), and the strict > in
+    // getNextPluginOlderThanTime() would otherwise skip that plugin entirely.
+    int pluginTime = -1;
     AudioProcessorGraph::NodeID lastId { 0 };
     bool hasInputConnected = false;
+
+    // Now holds exactly the successfully instantiated plugins, in graph order,
+    // which is the only ordering savePluginStates() and the Edit menu may use.
+    nodeDescriptions.clear();
 
     // NOTE: Node ids cannot begin at 0.
     for (int i = 1; i <= activePluginList.getNumTypes(); ++i)
@@ -230,7 +240,11 @@ void IconMenu::loadActivePlugins()
             instance->setStateInformation (savedPluginBinary.getData(),
                                           (int) savedPluginBinary.getSize());
 
-        const AudioProcessorGraph::NodeID thisId { (uint32) i };
+        // Successful nodes get contiguous ids 1..n so the menu and
+        // savePluginStates() can address them without holes. A failed plugin
+        // must not shift every later node id.
+        const AudioProcessorGraph::NodeID thisId { (uint32) (nodeDescriptions.size() + 1) };
+        nodeDescriptions.push_back (plugin);
         graph.addNode (std::move (instance), thisId);
 
         const bool bypass = getUserSettings().getBoolValue (getKey ("bypass", plugin), false);
@@ -258,6 +272,15 @@ void IconMenu::loadActivePlugins()
         connectChannels (graph, lastId, channelOne, outputNodeId, channelOne);
         connectChannels (graph, lastId, channelTwo, outputNodeId, channelTwo);
     }
+}
+
+AudioProcessorGraph::NodeID IconMenu::getNodeIdFor (const PluginDescription& plugin) const
+{
+    for (int i = 0; i < (int) nodeDescriptions.size(); ++i)
+        if (nodeDescriptions[i].uniqueId == plugin.uniqueId)
+            return AudioProcessorGraph::NodeID { (uint32) (i + 1) };
+
+    return AudioProcessorGraph::NodeID { 0 };
 }
 
 PluginDescription IconMenu::getNextPluginOlderThanTime (int& time) const
@@ -400,7 +423,7 @@ void IconMenu::menuInvocationCallback (int id, IconMenu* im)
 
         if (id == 3)
         {
-            const String color = getUserSettings().getValue ("icon");
+    const String color = getUserSettings().getValue ("icon");
             getUserSettings().setValue ("icon", color.equalsIgnoreCase ("black") ? "white" : "black");
             im->setIcon();
             return;
@@ -433,14 +456,19 @@ void IconMenu::menuInvocationCallback (int id, IconMenu* im)
             if (index >= (int) timeSorted.size())
                 return;
 
+            // Save first: after removeType() the sorted list no longer matches
+            // the graph's nodes, which misaligns every state on the way down.
+            im->savePluginStates();
+
             const String key = getKey ("order", timeSorted[index]);
 
             for (const auto& current : im->activePluginList.getTypes())
             {
                 if (key.equalsIgnoreCase (getKey ("order", current)))
                 {
-                    getUserSettings().removeValue (getKey ("order", timeSorted[index]));
-                    getUserSettings().removeValue (getKey ("bypass", timeSorted[index]));
+                    getUserSettings().removeValue (getKey ("order", current));
+                    getUserSettings().removeValue (getKey ("bypass", current));
+                    getUserSettings().removeValue (getKey ("state", current));
                     getAppProperties().saveIfNeeded();
 
                     im->activePluginList.removeType (current);
@@ -448,7 +476,6 @@ void IconMenu::menuInvocationCallback (int id, IconMenu* im)
                 }
             }
 
-            im->savePluginStates();
             im->loadActivePlugins();
         }
         // Add plugin
@@ -457,7 +484,17 @@ void IconMenu::menuInvocationCallback (int id, IconMenu* im)
             const auto types = im->knownPluginList.getTypes();
             const PluginDescription plugin = types[KnownPluginList::getIndexChosenByMenu (types, id)];
 
-            getUserSettings().setValue (getKey ("order", plugin), (int) time (nullptr));
+            // time(nullptr) alone collides when two plugins are added within the
+            // same second; a duplicate order value is invisible to
+            // getNextPluginOlderThanTime()'s strict >, so take max + 1 instead.
+            int maxOrder = 0;
+
+            for (const auto& current : im->activePluginList.getTypes())
+                maxOrder = jmax (maxOrder,
+                                 getUserSettings().getValue (getKey ("order", current)).trim().getIntValue());
+
+            const int newOrder = jmax ((int) time (nullptr), maxOrder + 1);
+            getUserSettings().setValue (getKey ("order", plugin), newOrder);
             getAppProperties().saveIfNeeded();
             im->activePluginList.addType (plugin);
 
@@ -484,9 +521,21 @@ void IconMenu::menuInvocationCallback (int id, IconMenu* im)
         // Show active plugin GUI
         else if (id >= im->INDEX_EDIT && id < im->INDEX_EDIT + 1000000)
         {
-            if (auto* f = im->graph.getNodeForId (AudioProcessorGraph::NodeID { (uint32) (id - im->INDEX_EDIT + 1) }))
-                if (auto* const w = PluginWindow::getWindowFor (f, PluginWindow::Normal))
-                    w->toFront (true);
+            const auto timeSorted = im->getTimeSortedList();
+            const int index = id - im->INDEX_EDIT;
+
+            if (index < 0 || index >= (int) timeSorted.size())
+                return;
+
+            // Node ids follow the successfully instantiated plugins, not the
+            // sorted menu list, so map through nodeDescriptions instead of
+            // assuming index + 1.
+            const auto nodeId = im->getNodeIdFor (timeSorted[index]);
+
+            if (nodeId.uid != 0)
+                if (auto* f = im->graph.getNodeForId (nodeId))
+                    if (auto* const w = PluginWindow::getWindowFor (f, PluginWindow::Normal))
+                        w->toFront (true);
         }
         // Move plugin up the list
         else if (id >= im->INDEX_MOVE_UP && id < im->INDEX_MOVE_UP + 1000000)
@@ -516,27 +565,31 @@ void IconMenu::movePlugin (int index, int direction)
     if (target < 0 || target >= (int) timeSorted.size())
         return;
 
-    // Renumber the whole chain so the requested plugin lands on the neighbour's slot.
-    // The original code shifted indexes in place and wrote past the end of the array
-    // when moving the last item.
+    // Save while the graph still matches the current sorted order, i.e. before
+    // the keys below are rewritten - otherwise every state lands on the wrong
+    // plugin.
+    savePluginStates();
+
+    // Values start at 1, not 0: getNextPluginOlderThanTime() selects with a
+    // strict greater-than from 0, so an order of 0 was invisible to it and the
+    // top plugin silently dropped out of the chain.
     for (int i = 0; i < (int) timeSorted.size(); ++i)
-        getUserSettings().setValue (getKey ("order", timeSorted[i]), i);
+        getUserSettings().setValue (getKey ("order", timeSorted[i]), i + 1);
 
     const PluginDescription moved = timeSorted[index];
     const PluginDescription swapped = timeSorted[target];
 
-    getUserSettings().setValue (getKey ("order", moved), target);
-    getUserSettings().setValue (getKey ("order", swapped), index);
+    getUserSettings().setValue (getKey ("order", moved), target + 1);
+    getUserSettings().setValue (getKey ("order", swapped), index + 1);
     getAppProperties().saveIfNeeded();
 
-    savePluginStates();
     loadActivePlugins();
 }
 
 //==============================================================================
 std::vector<PluginDescription> IconMenu::getTimeSortedList() const
 {
-    int time = 0;
+    int time = -1;
     std::vector<PluginDescription> list;
 
     for (int i = 0; i < activePluginList.getNumTypes(); ++i)
@@ -562,18 +615,19 @@ void IconMenu::deletePluginStates()
 
 void IconMenu::savePluginStates()
 {
-    const auto list = getTimeSortedList();
-
-    for (int i = 0; i < (int) list.size(); ++i)
+    // The graph only contains the plugins that instantiated successfully, and
+    // nodeDescriptions records them in the same order. Iterating the sorted
+    // settings list here instead would realign states with the wrong plugins
+    // whenever one failed to load or was removed.
+    for (int i = 0; i < (int) nodeDescriptions.size(); ++i)
     {
-        // The graph stores plugins at ids 1..n, matching the sorted order used above.
         if (auto* node = graph.getNodeForId (AudioProcessorGraph::NodeID { (uint32) (i + 1) }))
         {
             if (auto* processor = node->getProcessor())
             {
                 MemoryBlock savedStateBinary;
                 processor->getStateInformation (savedStateBinary);
-                getUserSettings().setValue (getKey ("state", list[i]),
+                getUserSettings().setValue (getKey ("state", nodeDescriptions[i]),
                                             savedStateBinary.toBase64Encoding());
             }
         }
